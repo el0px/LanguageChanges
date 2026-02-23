@@ -1,5 +1,6 @@
 package com.example.rippleeffect
 
+import android.content.ClipData
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
@@ -23,12 +24,15 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.foundation.Image
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextDecoration
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.FileProvider
@@ -70,6 +74,50 @@ enum class Currency(val code: String, val symbol: String, val nameEn: String, va
 }
 enum class AppLifecycle { INITIALIZING, READY, ERROR }
 
+// ==================== DATA TABLE MODELS ====================
+data class SubmittedEntry(
+    val id: String = UUID.randomUUID().toString(),
+    val description: String,
+    val amount: Double,
+    val currency: Currency,
+    val type: String,
+    val dateCreated: Date = Date()
+)
+
+enum class FilterField(val label: String, val labelEs: String) {
+    DESCRIPTION("Description", "Descripción"),
+    AMOUNT("Amount", "Cantidad"),
+    CURRENCY("Currency", "Moneda"),
+    TYPE("Type", "Tipo"),
+    DATE("Date", "Fecha")
+}
+
+enum class FilterOperator(val label: String, val labelEs: String) {
+    CONTAINS("contains", "contiene"),
+    EQUALS("equals", "igual a"),
+    GREATER_THAN("> (greater)", "> (mayor)"),
+    LESS_THAN("< (less)", "< (menor)"),
+    BEFORE("before", "antes de"),
+    AFTER("after", "después de")
+}
+
+enum class FilterConnector { AND, OR }
+
+data class FilterCondition(
+    val id: String = UUID.randomUUID().toString(),
+    val field: FilterField = FilterField.DESCRIPTION,
+    val operator: FilterOperator = FilterOperator.CONTAINS,
+    val value: String = "",
+    val connector: FilterConnector = FilterConnector.AND
+)
+
+enum class SortDirection { ASCENDING, DESCENDING }
+
+data class SortConfig(
+    val field: FilterField = FilterField.DATE,
+    val direction: SortDirection = SortDirection.DESCENDING
+)
+
 // Result sealed class for email sending feedback
 sealed class EmailResult {
     object Success : EmailResult()
@@ -99,6 +147,7 @@ fun RippleEffectApp() {
         SavedReport(name = "Annual Audit", dateCreated = Date(), status = ReportStatus.COMPLETED, owner = "John Doe", content = "Initial report content..."),
         SavedReport(name = "Q3 Summary", dateCreated = Date(System.currentTimeMillis() - 86400000), status = ReportStatus.IN_PROGRESS, owner = "Jane Smith", content = "Quarterly results...")
     ) }
+    val submittedEntries = remember { mutableStateListOf<SubmittedEntry>() }
 
     LaunchedEffect(Unit) { delay(1500); lifecycleState = AppLifecycle.READY }
 
@@ -109,7 +158,8 @@ fun RippleEffectApp() {
             AppLifecycle.READY -> MainContent(
                 selectedTab = selectedTab, onTabSelected = { selectedTab = it },
                 language = language, onLanguageChange = { lang -> language = lang; translation = if (lang == "es") "Hola, ¿cómo estás?" else "Hello, how are you?" },
-                translation = translation, entries = accountingEntries, reports = savedReports
+                translation = translation, entries = accountingEntries, reports = savedReports,
+                submittedEntries = submittedEntries
             )
         }
     }
@@ -138,13 +188,16 @@ fun MainContent(
     onLanguageChange: (String) -> Unit,
     translation: String,
     entries: MutableList<AccountingEntry>,
-    reports: MutableList<SavedReport>
+    reports: MutableList<SavedReport>,
+    submittedEntries: MutableList<SubmittedEntry>
 ) {
     var reportToEmail by remember { mutableStateOf<SavedReport?>(null) }
     var entriesToEmail by remember { mutableStateOf<List<AccountingEntry>?>(null) }
     var currentCurrency by remember { mutableStateOf(Currency.USD) }
     // null = no dialog; true = success; false = failure
     var emailResultDialogState by remember { mutableStateOf<EmailResult?>(null) }
+    var tableFilters by remember { mutableStateOf(listOf<FilterCondition>()) }
+    var tableSortConfig by remember { mutableStateOf(SortConfig()) }
     val context = LocalContext.current
     val isSpanish = language == "es"
 
@@ -248,7 +301,21 @@ fun MainContent(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Row(verticalAlignment = Alignment.CenterVertically) { Text("📚", fontSize = 24.sp); Spacer(Modifier.width(12.dp)); Text("Ripple Effect", fontWeight = FontWeight.SemiBold, fontSize = 18.sp) } },
+                title = { 
+    Row(verticalAlignment = Alignment.CenterVertically) { 
+        Image(
+            painter = painterResource(id = R.drawable.ripple_logo), // Make sure this matches your file name
+            contentDescription = "Ripple Effect Logo",
+            modifier = Modifier.size(24.dp)
+        )
+        Spacer(Modifier.width(12.dp))
+        Text(
+            text = "Ripple Effect", 
+            fontWeight = FontWeight.SemiBold, 
+            fontSize = 18.sp
+        ) 
+    } 
+},
                 actions = { Box(Modifier.padding(end = 16.dp).size(32.dp).clip(CircleShape).background(AppColors.UserIconBg), contentAlignment = Alignment.Center) { Text("e", color = AppColors.UserIconText, fontWeight = FontWeight.Bold) } },
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = AppColors.Surface)
             )
@@ -273,16 +340,28 @@ fun MainContent(
                         currentCurrency = currency
                         entriesToEmail = currentEntries
                         reportToEmail = newReport
+                        currentEntries.forEach { entry ->
+                            submittedEntries.add(0, SubmittedEntry(
+                                description = entry.type,
+                                amount = entry.amount,
+                                currency = currency,
+                                type = if (entry.isExpense) "Expense" else "Sale"
+                            ))
+                        }
                         onTabSelected(1)
                     }
                 )
-                1 -> CategoriesWithReportsScreen(
+                1 -> DataTableScreen(
                     isSpanish = isSpanish,
-                    reports = reports,
-                    onReportCompleted = { completedReport ->
-                        // Keep current entries/currency in scope; just trigger the email dialog
-                        entriesToEmail = null
-                        reportToEmail = completedReport
+                    submittedEntries = submittedEntries,
+                    filters = tableFilters,
+                    onFiltersChanged = { tableFilters = it },
+                    sortConfig = tableSortConfig,
+                    onSortConfigChanged = { tableSortConfig = it },
+                    onEmailRequest = { report, emailEntries, currency ->
+                        currentCurrency = currency
+                        entriesToEmail = emailEntries
+                        reportToEmail = report
                     }
                 )
             }
@@ -477,17 +556,26 @@ fun sendEmailWithReport(
             uris.add(csvUri)
         }
 
+        // Build ClipData with ALL attachment URIs — required on Android 13+ for
+        // FLAG_GRANT_READ_URI_PERMISSION to actually take effect.
+        val clipData = ClipData.newUri(context.contentResolver, "attachment", uris[0]).also { cd ->
+            uris.drop(1).forEach { uri -> cd.addItem(ClipData.Item(uri)) }
+        }
+
         val intent: Intent
         if (uris.size > 1) {
             intent = Intent(Intent.ACTION_SEND_MULTIPLE).apply {
-                // Use wildcard MIME so email apps actually pick up the attachments
-                type = "*/*"
+                type = "message/rfc822"
                 putParcelableArrayListExtra(Intent.EXTRA_STREAM, uris)
+                setClipData(clipData)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             }
         } else {
             intent = Intent(Intent.ACTION_SEND).apply {
-                type = "*/*"
+                type = "message/rfc822"
                 putExtra(Intent.EXTRA_STREAM, uris[0])
+                setClipData(clipData)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             }
         }
 
@@ -495,20 +583,19 @@ fun sendEmailWithReport(
             putExtra(Intent.EXTRA_EMAIL, arrayOf(email))
             putExtra(Intent.EXTRA_SUBJECT, "Ripple Effect Report: ${report.name}")
             putExtra(Intent.EXTRA_TEXT, "Please find attached the report for ${report.name}.")
-            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
 
         val chooser = Intent.createChooser(intent, "Send Email...")
+        chooser.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         if (context !is android.app.Activity) {
             chooser.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         }
 
-        // Grant URI read permission to every app that could potentially handle this
-        val resInfoList = context.packageManager.queryIntentActivities(chooser, android.content.pm.PackageManager.MATCH_DEFAULT_ONLY)
-        for (resolveInfo in resInfoList) {
-            val packageName = resolveInfo.activityInfo.packageName
+        // Also grant URI permission explicitly to every package the chooser resolves
+        val flags = android.content.pm.PackageManager.MATCH_DEFAULT_ONLY
+        context.packageManager.queryIntentActivities(chooser, flags).forEach { info ->
             uris.forEach { uri ->
-                context.grantUriPermission(packageName, uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                context.grantUriPermission(info.activityInfo.packageName, uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
             }
         }
 
@@ -634,4 +721,449 @@ fun ReportEditorView(report: SavedReport, isSpanish: Boolean, onExit: () -> Unit
 fun StatusBadge(status: ReportStatus, isSpanish: Boolean) {
     val color = if (status == ReportStatus.COMPLETED) AppColors.SuccessGreen else AppColors.WarningYellow
     Box(Modifier.background(color.copy(0.1f), RoundedCornerShape(16.dp)).padding(horizontal = 8.dp, vertical = 4.dp)) { Text(if (isSpanish) (if (status == ReportStatus.COMPLETED) "Completado" else "En Progreso") else status.name, color = color, fontSize = 12.sp, fontWeight = FontWeight.Bold) }
+}
+
+// ==================== FEATURE: DATA TABLE (REPORTS TAB) ====================
+
+fun getOperatorsForField(field: FilterField): List<FilterOperator> = when (field) {
+    FilterField.DESCRIPTION -> listOf(FilterOperator.CONTAINS, FilterOperator.EQUALS)
+    FilterField.AMOUNT -> listOf(FilterOperator.EQUALS, FilterOperator.GREATER_THAN, FilterOperator.LESS_THAN)
+    FilterField.CURRENCY -> listOf(FilterOperator.EQUALS)
+    FilterField.TYPE -> listOf(FilterOperator.EQUALS)
+    FilterField.DATE -> listOf(FilterOperator.EQUALS, FilterOperator.BEFORE, FilterOperator.AFTER)
+}
+
+fun evaluateCondition(entry: SubmittedEntry, condition: FilterCondition): Boolean {
+    if (condition.value.isBlank()) return true
+    val fv = condition.value.trim().lowercase()
+    return when (condition.field) {
+        FilterField.DESCRIPTION -> when (condition.operator) {
+            FilterOperator.CONTAINS -> entry.description.lowercase().contains(fv)
+            FilterOperator.EQUALS -> entry.description.lowercase() == fv
+            else -> true
+        }
+        FilterField.AMOUNT -> {
+            val nv = fv.toDoubleOrNull() ?: return true
+            when (condition.operator) {
+                FilterOperator.EQUALS -> entry.amount == nv
+                FilterOperator.GREATER_THAN -> entry.amount > nv
+                FilterOperator.LESS_THAN -> entry.amount < nv
+                else -> true
+            }
+        }
+        FilterField.CURRENCY -> entry.currency.code.lowercase() == fv
+        FilterField.TYPE -> entry.type.lowercase() == fv
+        FilterField.DATE -> {
+            val fmt = SimpleDateFormat("MM/dd/yyyy", Locale.US)
+            val filterDate = try { fmt.parse(condition.value.trim()) } catch (_: Exception) { null } ?: return true
+            val entryDayStr = fmt.format(entry.dateCreated)
+            val entryDay = try { fmt.parse(entryDayStr) } catch (_: Exception) { null } ?: return true
+            when (condition.operator) {
+                FilterOperator.EQUALS -> entryDayStr == fmt.format(filterDate)
+                FilterOperator.BEFORE -> entryDay.before(filterDate)
+                FilterOperator.AFTER -> entryDay.after(filterDate)
+                else -> true
+            }
+        }
+    }
+}
+
+fun applyFilters(entries: List<SubmittedEntry>, filters: List<FilterCondition>): List<SubmittedEntry> {
+    val active = filters.filter { it.value.isNotBlank() }
+    if (active.isEmpty()) return entries
+    return entries.filter { entry ->
+        var result = evaluateCondition(entry, active[0])
+        for (i in 1 until active.size) {
+            val next = evaluateCondition(entry, active[i])
+            result = when (active[i].connector) {
+                FilterConnector.AND -> result && next
+                FilterConnector.OR -> result || next
+            }
+        }
+        result
+    }
+}
+
+fun applySorting(entries: List<SubmittedEntry>, cfg: SortConfig): List<SubmittedEntry> {
+    val cmp: Comparator<SubmittedEntry> = when (cfg.field) {
+        FilterField.DESCRIPTION -> compareBy { it.description.lowercase() }
+        FilterField.AMOUNT -> compareBy { it.amount }
+        FilterField.CURRENCY -> compareBy { it.currency.code }
+        FilterField.TYPE -> compareBy { it.type }
+        FilterField.DATE -> compareBy { it.dateCreated }
+    }
+    return if (cfg.direction == SortDirection.ASCENDING) entries.sortedWith(cmp) else entries.sortedWith(cmp.reversed())
+}
+
+@Composable
+fun DataTableScreen(
+    isSpanish: Boolean,
+    submittedEntries: List<SubmittedEntry>,
+    filters: List<FilterCondition>,
+    onFiltersChanged: (List<FilterCondition>) -> Unit,
+    sortConfig: SortConfig,
+    onSortConfigChanged: (SortConfig) -> Unit,
+    onEmailRequest: (SavedReport, List<AccountingEntry>, Currency) -> Unit
+) {
+    var showFilters by remember { mutableStateOf(false) }
+    val dateFormat = remember { SimpleDateFormat("MM/dd/yyyy HH:mm", Locale.US) }
+    val filteredEntries = applyFilters(submittedEntries, filters)
+    val sortedEntries = applySorting(filteredEntries, sortConfig)
+    val horizontalScrollState = rememberScrollState()
+
+    Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
+        // Title row
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+            Text(if (isSpanish) "Tabla de Datos" else "Data Table", fontSize = 20.sp, fontWeight = FontWeight.Bold)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(onClick = { showFilters = !showFilters }) {
+                    Icon(Icons.Default.FilterList, null, Modifier.size(18.dp))
+                    Spacer(Modifier.width(4.dp))
+                    Text(if (isSpanish) "Filtrar" else "Filter")
+                    if (filters.any { it.value.isNotBlank() }) {
+                        Spacer(Modifier.width(4.dp))
+                        Box(Modifier.size(20.dp).background(AppColors.Primary, CircleShape), contentAlignment = Alignment.Center) {
+                            Text("${filters.count { it.value.isNotBlank() }}", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                        }
+                    }
+                }
+                Button(
+                    onClick = {
+                        if (sortedEntries.isNotEmpty()) {
+                            val reportContent = buildString {
+                                append(if (isSpanish) "Exportación de Tabla de Datos\n" else "Data Table Export\n")
+                                append("${if (isSpanish) "Generado" else "Generated"}: ${dateFormat.format(Date())}\n")
+                                append("${if (isSpanish) "Registros" else "Records"}: ${sortedEntries.size}\n\n")
+                                sortedEntries.forEach { e ->
+                                    append("${e.description} | ${e.currency.symbol}${String.format(Locale.US, "%.2f", e.amount)} | ${e.currency.code} | ${e.type} | ${dateFormat.format(e.dateCreated)}\n")
+                                }
+                            }
+                            val report = SavedReport(
+                                name = if (isSpanish) "Exportación-${SimpleDateFormat("dd-MM-yy", Locale.US).format(Date())}" else "Export-${SimpleDateFormat("MM-dd-yy", Locale.US).format(Date())}",
+                                dateCreated = Date(), status = ReportStatus.COMPLETED, owner = "Current User", content = reportContent
+                            )
+                            val acctEntries = sortedEntries.map { AccountingEntry(type = it.description, amount = it.amount, isExpense = it.type == "Expense" || it.type == "Gasto") }
+                            val currency = sortedEntries.firstOrNull()?.currency ?: Currency.USD
+                            onEmailRequest(report, acctEntries, currency)
+                        }
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = AppColors.Primary)
+                ) {
+                    Icon(Icons.Default.Email, null, Modifier.size(18.dp))
+                    Spacer(Modifier.width(4.dp))
+                    Text(if (isSpanish) "Correo" else "Email")
+                }
+            }
+        }
+
+        Spacer(Modifier.height(12.dp))
+
+        // Filters
+        AnimatedVisibility(visible = showFilters) {
+            FilterSection(isSpanish = isSpanish, filters = filters, onFiltersChanged = onFiltersChanged)
+        }
+
+        // Record count
+        Text(
+            "${sortedEntries.size} ${if (isSpanish) "registros" else "records"}",
+            fontSize = 12.sp, color = AppColors.TextSecondary, modifier = Modifier.padding(vertical = 8.dp)
+        )
+
+        if (submittedEntries.isEmpty()) {
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Icon(Icons.Default.GridOn, null, Modifier.size(48.dp), tint = AppColors.TextSecondary)
+                    Spacer(Modifier.height(12.dp))
+                    Text(if (isSpanish) "No hay datos aún" else "No data yet", color = AppColors.TextSecondary, fontSize = 16.sp)
+                    Text(if (isSpanish) "Envíe un informe en la pestaña Artículos" else "Submit a report in the Items tab", color = AppColors.TextSecondary, fontSize = 13.sp)
+                }
+            }
+        } else {
+            Card(
+                modifier = Modifier.fillMaxWidth().weight(1f),
+                border = BorderStroke(1.dp, AppColors.Border),
+                colors = CardDefaults.cardColors(containerColor = AppColors.Surface)
+            ) {
+                Column {
+                    // Table header
+                    Row(
+                        Modifier.fillMaxWidth().horizontalScroll(horizontalScrollState)
+                            .background(AppColors.Gray50).padding(vertical = 6.dp)
+                    ) {
+                        SortableColumnHeader(if (isSpanish) "Descripción" else "Description", FilterField.DESCRIPTION, sortConfig, onSortConfigChanged, 140.dp, isSpanish)
+                        SortableColumnHeader(if (isSpanish) "Cantidad" else "Amount", FilterField.AMOUNT, sortConfig, onSortConfigChanged, 100.dp, isSpanish)
+                        SortableColumnHeader(if (isSpanish) "Moneda" else "Currency", FilterField.CURRENCY, sortConfig, onSortConfigChanged, 85.dp, isSpanish)
+                        SortableColumnHeader(if (isSpanish) "Tipo" else "Type", FilterField.TYPE, sortConfig, onSortConfigChanged, 85.dp, isSpanish)
+                        SortableColumnHeader(if (isSpanish) "Fecha" else "Date", FilterField.DATE, sortConfig, onSortConfigChanged, 130.dp, isSpanish)
+                    }
+                    HorizontalDivider(color = AppColors.Border, thickness = 1.dp)
+
+                    // Table body
+                    if (sortedEntries.isEmpty()) {
+                        Box(Modifier.fillMaxWidth().padding(32.dp), contentAlignment = Alignment.Center) {
+                            Text(
+                                if (isSpanish) "No hay resultados con estos filtros" else "No results match the current filters",
+                                color = AppColors.TextSecondary, fontSize = 14.sp
+                            )
+                        }
+                    } else {
+                        LazyColumn(Modifier.fillMaxWidth()) {
+                            items(sortedEntries, key = { it.id }) { entry ->
+                                Row(
+                                    Modifier.fillMaxWidth().horizontalScroll(horizontalScrollState)
+                                        .padding(vertical = 10.dp)
+                                ) {
+                                    Text(entry.description, Modifier.width(140.dp).padding(horizontal = 12.dp), fontSize = 13.sp, maxLines = 1)
+                                    Text(
+                                        "${entry.currency.symbol}${String.format(Locale.US, "%.2f", entry.amount)}",
+                                        Modifier.width(100.dp).padding(horizontal = 12.dp), fontSize = 13.sp,
+                                        fontWeight = FontWeight.Medium,
+                                        color = if (entry.type == "Expense") AppColors.ErrorRed else AppColors.SuccessGreen
+                                    )
+                                    Text(entry.currency.code, Modifier.width(85.dp).padding(horizontal = 12.dp), fontSize = 13.sp)
+                                    Box(Modifier.width(85.dp).padding(horizontal = 12.dp)) {
+                                        val tc = if (entry.type == "Expense") AppColors.ErrorRed else AppColors.SuccessGreen
+                                        Box(Modifier.background(tc.copy(0.1f), RoundedCornerShape(12.dp)).padding(horizontal = 8.dp, vertical = 2.dp)) {
+                                            Text(entry.type, fontSize = 11.sp, color = tc, fontWeight = FontWeight.Medium)
+                                        }
+                                    }
+                                    Text(
+                                        dateFormat.format(entry.dateCreated),
+                                        Modifier.width(130.dp).padding(horizontal = 12.dp), fontSize = 13.sp,
+                                        color = AppColors.TextSecondary
+                                    )
+                                }
+                                HorizontalDivider(color = AppColors.Border)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun SortableColumnHeader(
+    label: String, field: FilterField, sortConfig: SortConfig,
+    onSortChanged: (SortConfig) -> Unit, width: Dp, isSpanish: Boolean
+) {
+    var showMenu by remember { mutableStateOf(false) }
+    val active = sortConfig.field == field
+    Box(Modifier.width(width).padding(horizontal = 12.dp)) {
+        Row(Modifier.clickable { showMenu = true }, verticalAlignment = Alignment.CenterVertically) {
+            Text(label, fontWeight = FontWeight.Bold, fontSize = 12.sp, color = if (active) AppColors.Primary else AppColors.TextPrimary, maxLines = 1)
+            Spacer(Modifier.width(2.dp))
+            Text(
+                if (active) (if (sortConfig.direction == SortDirection.ASCENDING) "▲" else "▼") else "↕",
+                fontSize = 10.sp, color = if (active) AppColors.Primary else AppColors.TextSecondary
+            )
+        }
+        DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }) {
+            DropdownMenuItem(
+                text = { Text(if (isSpanish) "↑ Ascendente" else "↑ Ascending") },
+                onClick = { onSortChanged(SortConfig(field, SortDirection.ASCENDING)); showMenu = false },
+                leadingIcon = if (active && sortConfig.direction == SortDirection.ASCENDING) {
+                    { Icon(Icons.Default.Check, null, tint = AppColors.Primary) }
+                } else null
+            )
+            DropdownMenuItem(
+                text = { Text(if (isSpanish) "↓ Descendente" else "↓ Descending") },
+                onClick = { onSortChanged(SortConfig(field, SortDirection.DESCENDING)); showMenu = false },
+                leadingIcon = if (active && sortConfig.direction == SortDirection.DESCENDING) {
+                    { Icon(Icons.Default.Check, null, tint = AppColors.Primary) }
+                } else null
+            )
+        }
+    }
+}
+
+@Composable
+fun FilterSection(isSpanish: Boolean, filters: List<FilterCondition>, onFiltersChanged: (List<FilterCondition>) -> Unit) {
+    Card(
+        Modifier.fillMaxWidth().padding(bottom = 12.dp),
+        border = BorderStroke(1.dp, AppColors.Border),
+        colors = CardDefaults.cardColors(containerColor = AppColors.Gray50)
+    ) {
+        Column(Modifier.padding(12.dp)) {
+            if (filters.isEmpty()) {
+                Button(
+                    onClick = { onFiltersChanged(listOf(FilterCondition())) },
+                    Modifier.fillMaxWidth(),
+                    colors = ButtonDefaults.buttonColors(containerColor = AppColors.Primary)
+                ) {
+                    Icon(Icons.Default.Add, null, Modifier.size(18.dp))
+                    Spacer(Modifier.width(4.dp))
+                    Text(if (isSpanish) "Agregar Filtro" else "Add Filter")
+                }
+            } else {
+                filters.forEachIndexed { index, condition ->
+                    if (index > 0) {
+                        // AND / OR connector toggle
+                        Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), horizontalArrangement = Arrangement.Center) {
+                            val isAnd = condition.connector == FilterConnector.AND
+                            OutlinedButton(
+                                onClick = {
+                                    onFiltersChanged(filters.toMutableList().also { it[index] = condition.copy(connector = FilterConnector.AND) })
+                                },
+                                colors = ButtonDefaults.outlinedButtonColors(
+                                    containerColor = if (isAnd) AppColors.Primary.copy(0.1f) else Color.Transparent
+                                ),
+                                modifier = Modifier.height(32.dp)
+                            ) {
+                                Text("AND", fontSize = 12.sp, fontWeight = if (isAnd) FontWeight.Bold else FontWeight.Normal, color = if (isAnd) AppColors.Primary else AppColors.TextSecondary)
+                            }
+                            Spacer(Modifier.width(8.dp))
+                            OutlinedButton(
+                                onClick = {
+                                    onFiltersChanged(filters.toMutableList().also { it[index] = condition.copy(connector = FilterConnector.OR) })
+                                },
+                                colors = ButtonDefaults.outlinedButtonColors(
+                                    containerColor = if (!isAnd) AppColors.Primary.copy(0.1f) else Color.Transparent
+                                ),
+                                modifier = Modifier.height(32.dp)
+                            ) {
+                                Text("OR", fontSize = 12.sp, fontWeight = if (!isAnd) FontWeight.Bold else FontWeight.Normal, color = if (!isAnd) AppColors.Primary else AppColors.TextSecondary)
+                            }
+                        }
+                    }
+                    FilterConditionRow(
+                        isSpanish, condition,
+                        onChanged = { updated -> onFiltersChanged(filters.toMutableList().also { it[index] = updated }) },
+                        onRemove = { onFiltersChanged(filters.toMutableList().also { it.removeAt(index) }) }
+                    )
+                }
+                Spacer(Modifier.height(8.dp))
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                    TextButton(onClick = { onFiltersChanged(filters + FilterCondition()) }) {
+                        Icon(Icons.Default.Add, null, Modifier.size(16.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text(if (isSpanish) "Agregar" else "Add", fontSize = 13.sp)
+                    }
+                    TextButton(onClick = { onFiltersChanged(emptyList()) }) {
+                        Text(if (isSpanish) "Limpiar Todo" else "Clear All", fontSize = 13.sp, color = AppColors.ErrorRed)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun FilterConditionRow(
+    isSpanish: Boolean,
+    condition: FilterCondition,
+    onChanged: (FilterCondition) -> Unit,
+    onRemove: () -> Unit
+) {
+    var fieldExpanded by remember { mutableStateOf(false) }
+    var opExpanded by remember { mutableStateOf(false) }
+    val ops = getOperatorsForField(condition.field)
+
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+        // Field selector
+        Box(Modifier.weight(1f)) {
+            OutlinedButton(
+                onClick = { fieldExpanded = true },
+                Modifier.fillMaxWidth(),
+                contentPadding = PaddingValues(horizontal = 8.dp)
+            ) {
+                Text(if (isSpanish) condition.field.labelEs else condition.field.label, fontSize = 11.sp, maxLines = 1)
+            }
+            DropdownMenu(expanded = fieldExpanded, onDismissRequest = { fieldExpanded = false }) {
+                FilterField.values().forEach { f ->
+                    DropdownMenuItem(
+                        text = { Text(if (isSpanish) f.labelEs else f.label, fontSize = 13.sp) },
+                        onClick = {
+                            val newOps = getOperatorsForField(f)
+                            val newOp = if (condition.operator in newOps) condition.operator else newOps.first()
+                            onChanged(condition.copy(field = f, operator = newOp, value = ""))
+                            fieldExpanded = false
+                        }
+                    )
+                }
+            }
+        }
+        // Operator selector
+        Box(Modifier.weight(1f)) {
+            OutlinedButton(
+                onClick = { opExpanded = true },
+                Modifier.fillMaxWidth(),
+                contentPadding = PaddingValues(horizontal = 8.dp)
+            ) {
+                Text(if (isSpanish) condition.operator.labelEs else condition.operator.label, fontSize = 11.sp, maxLines = 1)
+            }
+            DropdownMenu(expanded = opExpanded, onDismissRequest = { opExpanded = false }) {
+                ops.forEach { op ->
+                    DropdownMenuItem(
+                        text = { Text(if (isSpanish) op.labelEs else op.label, fontSize = 13.sp) },
+                        onClick = { onChanged(condition.copy(operator = op)); opExpanded = false }
+                    )
+                }
+            }
+        }
+        // Value input — context-aware
+        Box(Modifier.weight(1.2f)) {
+            when (condition.field) {
+                FilterField.CURRENCY -> {
+                    var exp by remember { mutableStateOf(false) }
+                    OutlinedButton(
+                        onClick = { exp = true }, Modifier.fillMaxWidth(),
+                        contentPadding = PaddingValues(horizontal = 8.dp)
+                    ) {
+                        Text(condition.value.ifBlank { if (isSpanish) "Elegir…" else "Choose…" }, fontSize = 11.sp, maxLines = 1)
+                    }
+                    DropdownMenu(expanded = exp, onDismissRequest = { exp = false }) {
+                        Currency.values().forEach { c ->
+                            DropdownMenuItem(
+                                text = { Text("${c.symbol} ${c.code}", fontSize = 13.sp) },
+                                onClick = { onChanged(condition.copy(value = c.code)); exp = false }
+                            )
+                        }
+                    }
+                }
+                FilterField.TYPE -> {
+                    var exp by remember { mutableStateOf(false) }
+                    OutlinedButton(
+                        onClick = { exp = true }, Modifier.fillMaxWidth(),
+                        contentPadding = PaddingValues(horizontal = 8.dp)
+                    ) {
+                        Text(condition.value.ifBlank { if (isSpanish) "Elegir…" else "Choose…" }, fontSize = 11.sp, maxLines = 1)
+                    }
+                    DropdownMenu(expanded = exp, onDismissRequest = { exp = false }) {
+                        listOf("Expense" to (if (isSpanish) "Gasto" else "Expense"), "Sale" to (if (isSpanish) "Venta" else "Sale")).forEach { (v, l) ->
+                            DropdownMenuItem(
+                                text = { Text(l, fontSize = 13.sp) },
+                                onClick = { onChanged(condition.copy(value = v)); exp = false }
+                            )
+                        }
+                    }
+                }
+                else -> {
+                    OutlinedTextField(
+                        value = condition.value,
+                        onValueChange = { onChanged(condition.copy(value = it)) },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        textStyle = androidx.compose.ui.text.TextStyle(fontSize = 12.sp),
+                        placeholder = {
+                            Text(
+                                when (condition.field) {
+                                    FilterField.DATE -> "MM/dd/yyyy"
+                                    FilterField.AMOUNT -> "0.00"
+                                    else -> if (isSpanish) "Buscar…" else "Search…"
+                                },
+                                fontSize = 11.sp
+                            )
+                        },
+                        keyboardOptions = if (condition.field == FilterField.AMOUNT) KeyboardOptions(keyboardType = KeyboardType.Decimal) else KeyboardOptions.Default
+                    )
+                }
+            }
+        }
+        // Remove button
+        IconButton(onClick = onRemove, Modifier.size(32.dp)) {
+            Icon(Icons.Default.Close, null, Modifier.size(16.dp), tint = AppColors.ErrorRed)
+        }
+    }
 }
