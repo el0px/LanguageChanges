@@ -322,8 +322,8 @@ fun MainContent(
         },
         bottomBar = {
             NavigationBar(containerColor = AppColors.Surface, tonalElevation = 0.dp) {
-                NavigationBarItem(icon = { Icon(Icons.Default.List, null) }, label = { Text(if (isSpanish) "Artículos" else "Items") }, selected = selectedTab == 0, onClick = { onTabSelected(0) })
-                NavigationBarItem(icon = { Icon(Icons.Default.Folder, null) }, label = { Text(if (isSpanish) "Categorías" else "Categories") }, selected = selectedTab == 1, onClick = { onTabSelected(1) })
+                NavigationBarItem(icon = { Icon(Icons.Default.List, null) }, label = { Text(if (isSpanish) "Informe" else "Report") }, selected = selectedTab == 0, onClick = { onTabSelected(0) })
+                NavigationBarItem(icon = { Icon(Icons.Default.Folder, null) }, label = { Text(if (isSpanish) "Tabla" else "Categories") }, selected = selectedTab == 1, onClick = { onTabSelected(1) })
             }
         }
     ) { padding ->
