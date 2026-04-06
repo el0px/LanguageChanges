@@ -37,6 +37,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.FileProvider
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.*
@@ -139,6 +140,7 @@ fun RippleEffectTheme(content: @Composable () -> Unit) {
 @Composable
 fun RippleEffectApp() {
     var lifecycleState by remember { mutableStateOf(AppLifecycle.INITIALIZING) }
+    var loadVersion by remember { mutableIntStateOf(0) }
     var selectedTab by remember { mutableIntStateOf(0) }
     var language by remember { mutableStateOf("en") }
     var translation by remember { mutableStateOf("Hello, how are you?") }
@@ -149,12 +151,26 @@ fun RippleEffectApp() {
     ) }
     val submittedEntries = remember { mutableStateListOf<SubmittedEntry>() }
 
-    LaunchedEffect(Unit) { delay(1500); lifecycleState = AppLifecycle.READY }
+    LaunchedEffect(loadVersion) {
+        lifecycleState = AppLifecycle.INITIALIZING
+        runCatching {
+            delay(500)
+            val remote = Backend.fetchSubmittedEntries()
+            if (remote.isNotEmpty()) {
+                submittedEntries.clear()
+                submittedEntries.addAll(remote.sortedByDescending { it.dateCreated })
+            }
+            lifecycleState = AppLifecycle.READY
+        }.onFailure {
+            Log.e(TAG, "Failed to initialize backend", it)
+            lifecycleState = AppLifecycle.ERROR
+        }
+    }
 
     Crossfade(targetState = lifecycleState, label = "AppTransition") { state ->
         when (state) {
             AppLifecycle.INITIALIZING -> LoadingScreen()
-            AppLifecycle.ERROR -> RetryScreen { lifecycleState = AppLifecycle.INITIALIZING }
+            AppLifecycle.ERROR -> RetryScreen { loadVersion += 1 }
             AppLifecycle.READY -> MainContent(
                 selectedTab = selectedTab, onTabSelected = { selectedTab = it },
                 language = language, onLanguageChange = { lang -> language = lang; translation = if (lang == "es") "Hola, ¿cómo estás?" else "Hello, how are you?" },
@@ -191,6 +207,7 @@ fun MainContent(
     reports: MutableList<SavedReport>,
     submittedEntries: MutableList<SubmittedEntry>
 ) {
+    val scope = rememberCoroutineScope()
     var reportToEmail by remember { mutableStateOf<SavedReport?>(null) }
     var entriesToEmail by remember { mutableStateOf<List<AccountingEntry>?>(null) }
     var currentCurrency by remember { mutableStateOf(Currency.USD) }
@@ -337,6 +354,9 @@ fun MainContent(
                     entries = entries,
                     onReportSubmit = { newReport, currentEntries, currency ->
                         reports.add(0, newReport)
+                        scope.launch {
+                            Backend.saveSubmittedEntries(currentEntries, currency)
+                        }
                         currentCurrency = currency
                         entriesToEmail = currentEntries
                         reportToEmail = newReport
@@ -381,7 +401,7 @@ fun WaterSalesAccountingScreen(
 ) {
     var selectedCurrency by remember { mutableStateOf(Currency.USD) }
     val cost = entries.filter { it.isExpense }.sumOf { it.amount }
-    val profit = entries.filter { !it.isExpense }.sumOf { it.amount }
+    val income = entries.filter { !it.isExpense }.sumOf { it.amount }
     var summaryReport by remember { mutableStateOf("") }
     var entryType by remember { mutableStateOf("") }
     var entryAmount by remember { mutableStateOf("") }
@@ -404,7 +424,7 @@ fun WaterSalesAccountingScreen(
         item {
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 AccountingSummaryCard(Modifier.weight(1f), if (isSpanish) "Costos" else "Costs", cost, selectedCurrency, Color(0xFFFEE2E2), Color(0xFF991B1B))
-                AccountingSummaryCard(Modifier.weight(1f), if (isSpanish) "Ganancias" else "Profit", profit, selectedCurrency, Color(0xFFDCFCE7), Color(0xFF166534))
+                AccountingSummaryCard(Modifier.weight(1f), if (isSpanish) "Ingresos" else "Profit", income, selectedCurrency, Color(0xFFDCFCE7), Color(0xFF166534))
             }
         }
         item {
@@ -457,8 +477,8 @@ fun WaterSalesAccountingScreen(
                     Spacer(Modifier.height(16.dp))
                     Column(Modifier.fillMaxWidth().background(AppColors.CardBackground, RoundedCornerShape(8.dp)).padding(16.dp)) {
                         ReportRow(if (isSpanish) "Costos Totales:" else "Total Costs:", "${selectedCurrency.symbol}${String.format(Locale.US, "%.2f", cost)}")
-                        ReportRow(if (isSpanish) "Ganancias Totales:" else "Total Profit:", "${selectedCurrency.symbol}${String.format(Locale.US, "%.2f", profit)}")
-                        ReportRow(if (isSpanish) "Beneficio Neto:" else "Net Benefit:", "${selectedCurrency.symbol}${String.format(Locale.US, "%.2f", profit - cost)}")
+                        ReportRow(if (isSpanish) "Ingresos Totales:" else "Total Profit:", "${selectedCurrency.symbol}${String.format(Locale.US, "%.2f", income)}")
+                        ReportRow(if (isSpanish) "Beneficio Neto:" else "Net Benefit:", "${selectedCurrency.symbol}${String.format(Locale.US, "%.2f", income - cost)}")
                         if (entries.isNotEmpty()) {
                             Spacer(Modifier.height(16.dp)); Text(if (isSpanish) "Desglose" else "Breakdown", fontWeight = FontWeight.Bold)
                             entries.forEach { entry -> Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), horizontalArrangement = Arrangement.SpaceBetween) { Text(entry.type, fontSize = 12.sp, color = AppColors.TextSecondary); Text("${if (entry.isExpense) "-" else "+"}${selectedCurrency.symbol}${entry.amount}", fontSize = 12.sp, color = if (entry.isExpense) AppColors.ErrorRed else AppColors.SuccessGreen) } }
@@ -482,16 +502,16 @@ fun WaterSalesAccountingScreen(
                         if (isSpanish) {
                             append("Resumen de Contabilidad:\n")
                             append("Costos Totales: ${selectedCurrency.symbol}${String.format(Locale.US, "%.2f", cost)}\n")
-                            append("Ganancias Totales: ${selectedCurrency.symbol}${String.format(Locale.US, "%.2f", profit)}\n")
-                            append("Neto: ${selectedCurrency.symbol}${String.format(Locale.US, "%.2f", profit - cost)}\n\n")
+                            append("Ingresos Totales: ${selectedCurrency.symbol}${String.format(Locale.US, "%.2f", income)}\n")
+                            append("Neto: ${selectedCurrency.symbol}${String.format(Locale.US, "%.2f", income - cost)}\n\n")
                             append("Desglose:\n")
                             entries.forEach { append("- ${it.type}: ${if (it.isExpense) "-" else "+"}${selectedCurrency.symbol}${it.amount}\n") }
                             append("\nResumen del Usuario:\n$summaryReport")
                         } else {
                             append("Accounting Summary:\n")
                             append("Total Costs: ${selectedCurrency.symbol}${String.format(Locale.US, "%.2f", cost)}\n")
-                            append("Total Profit: ${selectedCurrency.symbol}${String.format(Locale.US, "%.2f", profit)}\n")
-                            append("Net: ${selectedCurrency.symbol}${String.format(Locale.US, "%.2f", profit - cost)}\n\n")
+                            append("Total Profit: ${selectedCurrency.symbol}${String.format(Locale.US, "%.2f", income)}\n")
+                            append("Net: ${selectedCurrency.symbol}${String.format(Locale.US, "%.2f", income - cost)}\n\n")
                             append("Breakdown:\n")
                             entries.forEach { append("- ${it.type}: ${if (it.isExpense) "-" else "+"}${selectedCurrency.symbol}${it.amount}\n") }
                             append("\nUser Summary:\n$summaryReport")
